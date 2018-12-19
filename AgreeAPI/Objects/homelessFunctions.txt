@@ -1,0 +1,215 @@
+		public function getResult(){
+			return $this->data;
+		}
+		
+		private function help(){
+
+		}
+		
+		private function createUser(){
+			if(!isset($this->args["newEmail"])||!isset($this->args["newPassword"])){
+				$this->addError("`email` and `password` must be set.");
+				return false;
+			}
+			
+			// Wipe out current user
+			unset($this->user);
+			
+			// Set new arguments
+			$newEmail = $this->args["newEmail"];
+			$newPassword = $this->args["newPassword"];
+			
+			// Wipe out args but for these two fields
+			$args = array("newEmail"=>$newEmail,"newPassword"=>$newPassword);
+
+			// Assign new user
+			$this->user = new User($this->con,$this->args);
+
+			if($this->user->isAuthenticated()){
+				return true;
+			} else {
+				$this->addError("Could not authenticate new user.");
+				return false;
+			}
+		}
+		private function updatePassword(){
+			if(!isset($this->args["newPassword"])){
+				$this->addError("'newPassword' not set!");
+				return false;
+			}
+			if($this->user->updatePassword($this->args["newPassword"])){
+				return true;
+			} else {
+				$this->addError("Could not update password");
+				return false;
+			}
+		}
+
+		// ** These do require authentication
+
+		// Get a specific question
+		private function getQuestion(){
+			if(!isset($this->args["questionId"])){
+				$this->addError("'questionId' not set!");
+				return false;
+			}
+			// TODO: Check for deadline and trashed
+			// TODO: Check if user is allowed to see this question
+			
+		}
+		// Get all relevant questions
+		private function getQuestions(){
+			// TODO: Check for deadline and trashed
+			// TODO: Check if user is allowed to see this question
+			if($query = $this->con->prepare("
+				SELECT
+					q.Id AS Id,
+					q.title AS Title,
+					q.startTime AS StartTime,
+					q.hardDeadline AS HardDeadline,
+					q.movingDeadlineSeconds AS MovingDeadlineSeconds,
+					u.email Creator
+					FROM questions q
+					INNER JOIN users u ON q.userId = u.id
+					LEFT JOIN invitations i ON i.questionId = q.id
+					WHERE
+						(q.userId = ? OR i.email = ?)
+			")){
+				$id = $this->user->getId();
+				$email = $this->user->getEmail();
+				$query->bind_param("ss",$id,$email);
+				$query->execute();
+				$query->bind_result($id,$title,$startTime,$hardDeadline,$movingDeadlineSeconds,$creator);
+				if($this->con->errno){
+					return array("Error"=>$this->con->error);
+				} else {
+					$questions = array();
+					while($query->fetch()){
+						$questions[] = array("Id"=>$id,"Title"=>$title,"StartTime"=>$startTime,"HardDeadline"=>$hardDeadline,"MovingDeadlineSeconds"=>$movingDeadlineSeconds,"Creator"=>$creator);
+					}
+					return $questions;
+				}
+			}
+			return array("Error"=>"Could not retrieve that question.");
+		}
+		// Update a specific question
+		private function updateQuestion(){
+			return "Updating your question.";
+		}
+		// Create a question
+		private function createQuestion($title = null){
+			if($title == null){
+				if(!isset($this->args["title"])){
+					$this->addError("'title' must be set!");
+					return false;
+				}
+				$title = $this->args["title"];
+			}
+
+			if($query = $this->con->prepare("INSERT INTO questions (id,title,userId) VALUES (?,?,?) ")){
+				$id = $this->getNewGuid();
+				$userId = $this->user->getId();
+				$query->bind_param("sss",$id,$title,$userId);
+				$query->execute();
+				$query->close();
+
+				if($this->con->errno){
+					$this->addError($this->con->error); // TODO: Obfuscate this
+					return false;
+				} else {
+					if($this->inviteUser($id,$this->user->getEmail())){
+						return array("Success"=>$id);
+					} else {
+						$this->addError("Couldn't add user to their own question.");
+						return false;
+					}
+				}
+			}
+			$this->addError("Could not retrieve that question.");
+			return false;
+		}
+		// Invite a user by email address
+		private function inviteUser($questionId = null,$inviteeEmail = null){
+			// Be sure we have good values before we start.
+			if($questionId == null || $inviteeEmail == null){
+				if(!isset($this->args["questionId"])||!isset($this->args["inviteeEmail"])){
+					$this->addError("Please provide a `questionId` and `inviteeEmail`.");
+					return false;
+				} else {
+					$questionId = $this->args["questionId"];
+					$inviteeEmail = $this->args["inviteeEmail"];
+				}
+			}
+
+			// Did this user create the question?
+			// Is the invited user not already invited to this question?
+			// Both true? Add the entry.
+			// TODO: Note that we tie this to email and not userId on purpose.
+			//			We want to be able to invite users to participate, asking them
+			//			to register if they haven't yet.
+
+			if($query = $this->con->prepare("
+				INSERT INTO invitations
+					(id,questionId,email)
+				SELECT ?,q.Id,?
+				FROM
+					questions q
+					INNER JOIN users u ON u.Id = q.userId
+				WHERE
+					q.Id = ?
+					AND
+					u.Id = ?
+					AND
+				 	? NOT IN (SELECT email FROM invitations WHERE questionId = ?)")){
+				$id = $this->getNewGuid();
+				$userId = $this->user->getId();
+				$query->bind_param("ssssss",$id,$inviteeEmail,$questionId,$userId,$inviteeEmail,$questionId);
+				$query->execute();
+				$query->close();
+				if($this->con->errno){
+					$this->addError($this->con->error); // TODO: Obfuscate this
+					return false;
+				} else if($this->isInvited($questionId,$inviteeEmail)){
+					return true;
+				} else {
+					$this->addError("Could not invite `{$inviteeEmail}`."); // TODO: Perhaps be more specific in this message?
+					return false;
+				}
+
+			}
+			return true;
+		}
+		// Check that user is invited
+		private function isInvited($questionId,$email){
+			$this->addError("isInvited(".$questionId.",".$email.")");
+			if($query = $this->con->prepare("
+				SELECT COUNT(*) FROM invitations WHERE questionId = ? AND email = ?
+			")){
+				$query->bind_param("ss",$questionId,$email);
+				$query->execute();
+				$query->bind_result($count);
+				$query->fetch();
+				$query->close();
+				if($count == 1){
+					return true;
+				} else {
+					return false;
+				}
+			}
+			return false;
+		}
+		// Get a ballot
+		private function getBallot($questionId){
+			// Are you invited to participate?
+			if(isInvited($questionId,$this->user->getEmail())){
+				return "Here's your ballot.";
+			} else {
+				$this->addError("You're not invited to this question.");
+				return false;
+			}
+		}
+
+		private function vote(){
+			// Validate the ballot, which is a collection of votes, and submit
+			return "Thanks for voting.";
+		}
